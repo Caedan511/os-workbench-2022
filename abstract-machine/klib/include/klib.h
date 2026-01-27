@@ -55,4 +55,12 @@ int    vsnprintf (char *str, size_t size, const char *format, va_list ap);
 }
 #endif
 
+//spin lock
+static inline void lock(int *locked) { 
+  while (atomic_xchg(locked, 1)); 
+}
+static inline void unlock(int *locked) {
+  atomic_xchg(locked, 0); 
+}
+
 #endif

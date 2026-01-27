@@ -24,21 +24,21 @@ static inline void stack_switch_call(void *sp, void *entry, uintptr_t arg) {
 }
 
 enum co_status {
-  CO_NEW = 1, // 新创建，还未执行过
-  CO_RUNNING, // 已经执行过
-  CO_WAITING, // 在 co_wait 上等待
-  CO_DEAD,    // 已经结束，但还未释放资源
+  CO_NEW = 1, // new
+  CO_RUNNING, // executed
+  CO_WAITING, // waiting not use
+  CO_DEAD,    // coroutine done
 };
 
 struct co {
   const char *name;
-  void (*func)(void *); // co_start 指定的入口地址和参数
+  void (*func)(void *); // co_start entry and parameter
   void *arg;
   
-  enum co_status status;  // 协程的状态
-  struct co *    waiter;  // 是否有其他协程在等待当前协程
-  jmp_buf        context; // 寄存器现场 (setjmp.h)
-  uint8_t        stack[STACK_SIZE]; // 协程的堆栈
+  enum co_status status;  
+  struct co *    waiter;  // not use
+  jmp_buf        context; // regisier context 
+  uint8_t        stack[STACK_SIZE]; // stack of coroutine
 };
 
 

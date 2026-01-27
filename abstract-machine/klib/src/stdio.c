@@ -6,12 +6,15 @@
 
 #if !defined(__ISA_NATIVE__) || defined(__NATIVE_USE_KLIB__)
 
+
+int printf_lock = 0;
+
 char *convert(unsigned long int num, int base);
 static inline void puts(const char *s) {
   for (; *s; s++) putch(*s);
 }
 int printf(const char *fmt, ...) {
-
+  lock(&printf_lock);
   const char *traverse; 
   unsigned int i; 
   char *s; 
@@ -25,7 +28,10 @@ int printf(const char *fmt, ...) {
   { 
     while( *traverse != '%' ) 
     { 
-      if( *traverse == '\0') return 0; 
+      if( *traverse == '\0') {
+        unlock(&printf_lock);
+        return 0;
+      } 
       putch(*traverse);
       traverse++; 
     }
@@ -69,6 +75,7 @@ int printf(const char *fmt, ...) {
 
   //Module 3: Closing argument list to necessary clean-up
   va_end(arg); 
+  unlock(&printf_lock);
   return 0;
 }
 
