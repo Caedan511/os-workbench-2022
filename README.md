@@ -6,6 +6,7 @@ sperf
 pmm
 
 ## modify_origin
+```
 1.AM Makefile:   
 	add: -Wno-error=array-bounds(line 88,89)  
 2.x86_64.mk:   
@@ -15,5 +16,6 @@ pmm
 	origin:               -machine accel=tcg \(line 5)  
 	now:              -machine accel=tcg \  
 4.kernel.h:  
-	add:typedef struct cpu cpu_t;(line 30)  
+	add:typedef struct cpu cpu_t;(line 30)
+```
 
