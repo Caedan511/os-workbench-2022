@@ -2,7 +2,7 @@
 
 LDFLAGS    += -N -Ttext-segment=0x00100000
 QEMU_FLAGS += -serial mon:stdio \
-              -machine accel=tcg \
+              -machine pc-i440fx-6.0,accel=tcg  \
               -smp "$(smp)" \
               -drive format=raw,file=$(IMAGE)
 
