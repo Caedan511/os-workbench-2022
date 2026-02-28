@@ -11,3 +11,10 @@ AM_SRCS := x86/qemu/start64.S \
 
 run: build-arg
 	@qemu-system-x86_64 $(QEMU_FLAGS)
+
+.PHONY: gdb
+
+gdb:build-arg
+	@echo "*** Now run 'gdb' in another window."
+	@qemu-system-x86_64 -s -S $(QEMU_FLAGS)
+    
