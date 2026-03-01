@@ -7,110 +7,179 @@
 #if !defined(__ISA_NATIVE__) || defined(__NATIVE_USE_KLIB__)
 
 
-int printf_lock = 0;
+static char *convert(unsigned long int num, int base);
 
-char *convert(unsigned long int num, int base);
-static inline void puts(const char *s) {
-  for (; *s; s++) putch(*s);
+static void emit_string(void (*emit)(char, void *), void *arg, const char *s) {
+  while (*s) emit(*s++, arg);
 }
-int printf(const char *fmt, ...) {
-  lock(&printf_lock);
-  const char *traverse; 
-  unsigned int i; 
-  char *s; 
-  void* p;
-  uintptr_t v;
-  //Module 1: Initializing Myprintf's arguments 
-  va_list arg; 
-  va_start(arg, fmt); 
+//the printf core, printf, all printf class use it 
+int vprintf_core(void (*emit)(char, void *), void *arg, 
+                const char *fmt, va_list ap) {
 
-  for(traverse = fmt; *traverse != '\0'; traverse++) 
-  { 
-    while( *traverse != '%' ) 
-    { 
-      if( *traverse == '\0') {
-        unlock(&printf_lock);
-        return 0;
-      } 
-      putch(*traverse);
+  unsigned int i;
+  const char *traverse; 
+
+  for(traverse = fmt; *traverse != '\0'; traverse++) { 
+    while( *traverse != '%' && *traverse != '\0') { 
+      emit(*traverse, arg);
       traverse++; 
     }
+    if (*traverse == '\0')
+      break;
 
     traverse++; 
 
     //Module 2: Fetching and executing arguments
     switch(*traverse) 
     { 
-      case 'c' : i = va_arg(arg,int);     //Fetch char argument
-                  putch(i);
+      case 'c': i = va_arg(ap,int);     //Fetch char argument
+                  emit(i, arg);
                   break; 
 
-      case 'd' : i = va_arg(arg,int);         //Fetch Decimal/Integer argument
-                  if(i<0) 
-                  { 
-                      i = -i;
-                      putch('-'); 
+      case 'd': int d = va_arg(ap,int);         //Fetch Decimal/Integer argument
+                  if(d < 0) {  
+                    emit('-', arg);
+                    d = -d;
                   } 
-                  puts(convert(i,10));
+                  emit_string(emit, arg, convert(d, 10));
                   break; 
 
-      case 'o': i = va_arg(arg,unsigned int); //Fetch Octal representation
-                  puts(convert(i,8));
+      case 'o': i = va_arg(ap,unsigned int); //Fetch Octal representation
+                  emit_string(emit, arg, convert(i, 8));
                   break; 
 
-      case 's': s = va_arg(arg,char *);       //Fetch string
-                  puts(s); 
+      case 's': char *s = va_arg(ap, char *);       //Fetch string
+                  emit_string(emit, arg, s); 
                   break; 
 
-      case 'x': i = va_arg(arg,unsigned int); //Fetch Hexadecimal representation
-                  puts(convert(i,16));
+      case 'x': i = va_arg(ap,unsigned int); //Fetch Hexadecimal representation
+                  emit_string(emit, arg, convert(i, 16));
                   break; 
-      case 'p':  p = va_arg(arg,void*);         //Fetch Decimal/Integer argument
-                  v = (uintptr_t)p;
-                  puts("0x");
-                  puts(convert(v,16));
+      case 'p': void *p = va_arg(ap,void*);         //Fetch Decimal/Integer argument
+                  uintptr_t v = (uintptr_t)p;
+                  emit('0', arg);
+                  emit('x', arg);
+                  emit_string(emit, arg, convert(v, 16));
                   break; 
     }   
   } 
 
-  //Module 3: Closing argument list to necessary clean-up
-  va_end(arg); 
-  unlock(&printf_lock);
   return 0;
 }
 
-int vsprintf(char *out, const char *fmt, va_list ap) {
-  panic("Not implemented");
+static void console_emit(char c, void *arg) {
+  putch(c);
+}
+int printf(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+
+  int ret = vprintf_core(console_emit, NULL, fmt, ap);
+
+  va_end(ap);
+  return ret; 
 }
 
+
+struct buf_ctx {
+  char *buf;
+  size_t n;
+  size_t pos;
+};
+
+static void buffer_emit(char c, void *arg) {
+  struct buf_ctx *ctx = arg;
+  if (ctx->pos + 1 < ctx->n)
+      ctx->buf[ctx->pos] = c;
+  ctx->pos++;
+}
+
+int vsprintf(char *out, const char *fmt, va_list ap) {
+  struct buf_ctx ctx = {
+    .buf = out,
+    .n = (size_t)-1,
+    .pos = 0,
+  };
+
+  vprintf_core(buffer_emit, &ctx, fmt, ap);
+
+  out[ctx.pos] = '\0';
+  return ctx.pos;
+}
+
+
+
 int sprintf(char *out, const char *fmt, ...) {
-  panic("Not implemented");
+  va_list ap;
+  va_start(ap, fmt);
+
+  struct buf_ctx ctx = {
+    .buf = out,
+    .n = (size_t)-1,   
+    .pos = 0,
+  };
+
+  vprintf_core(buffer_emit, &ctx, fmt, ap);
+
+  out[ctx.pos] = '\0';
+
+  va_end(ap);
+  return ctx.pos;
 }
 
 int snprintf(char *out, size_t n, const char *fmt, ...) {
-  panic("Not implemented");
+  va_list ap;
+  va_start(ap, fmt);
+
+  struct buf_ctx ctx = { 
+    .buf = out,
+    .n =  n,
+    .pos = 0 
+  };
+
+  vprintf_core(buffer_emit, &ctx, fmt, ap);
+
+  if (n > 0) {
+      if (ctx.pos < n) out[ctx.pos] = '\0';
+      else out[n - 1] = '\0';
+  }
+
+  va_end(ap);
+  return ctx.pos;
 }
 
 int vsnprintf(char *out, size_t n, const char *fmt, va_list ap) {
-  panic("Not implemented");
+  struct buf_ctx ctx = {
+    .buf = out,
+    .n = n,
+    .pos = 0,
+  };
+
+  vprintf_core(buffer_emit, &ctx, fmt, ap);
+
+  if (n > 0) {
+    if (ctx.pos < n) out[ctx.pos] = '\0';
+    else out[n - 1] = '\0';
+  }
+
+  return ctx.pos;
 }
 
-char *convert(unsigned long int num, int base) 
-{ 
-    static char Representation[]= "0123456789ABCDEF";
-    static char buffer[50]; 
-    char *ptr; 
+static char *convert(unsigned long int num, int base) { 
+  static char Representation[]= "0123456789ABCDEF";
+  static char buffer[50]; 
+  char *ptr; 
 
-    ptr = &buffer[49]; 
-    *ptr = '\0'; 
+  ptr = &buffer[49]; 
+  *ptr = '\0'; 
 
-    do 
-    { 
-        *--ptr = Representation[num%base]; 
-        num /= base; 
-    }while(num != 0); 
+  do 
+  { 
+      *--ptr = Representation[num%base]; 
+      num /= base; 
+  }while(num != 0); 
 
-    return(ptr); 
+  return(ptr); 
 }
 
 #endif
