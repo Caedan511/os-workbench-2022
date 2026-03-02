@@ -15,7 +15,9 @@ pmm
 3.qemu.mk:  
 	origin:               -machine accel=tcg \(line 5)  
 	now:              -machine accel=tcg \  
-4.kernel.h:  
-	add:typedef struct cpu cpu_t;(line 30)
 ```
 
+## Environment
+```
+qemu-system-x86_64: QEMU emulator version 10.1.4 (qemu-10.1.4-1.fc43)
+```

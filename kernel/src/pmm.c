@@ -5,11 +5,14 @@
   slow path: buddy, alloc page
   fast path: slab, alloc small size memory
 */
-#define BUDDY_AND_SLAB
+//spin lock
+static inline void lock(int *locked) { 
+  while (atomic_xchg(locked, 1)); 
+}
+static inline void unlock(int *locked) {
+  atomic_xchg(locked, 0); 
+}
 
-
-
-#ifdef BUDDY_AND_SLAB
 
 #define PAGE_ORDER 16    //page_size: 64kB
 #define MAX_ORDER 26     //buddy total memory 64MB
@@ -23,16 +26,17 @@
 uintptr_t heap_base = 0x4000000;
 
 #define NUM_BLOCKS (1 << MAX_ORDER) / (1 << PAGE_ORDER)
-#define MAX_CPU 8
 
 typedef struct _block {
   struct _block *next;
 } block;
 
 //buddy page data
-static uint8_t block_order[NUM_BLOCKS];
-static block *free_lists[MAX_ORDER + 1];
-int page_lock = 0;
+static struct {
+  uint8_t block_order[NUM_BLOCKS];
+  block *free_lists[MAX_ORDER + 1];
+  int page_lock;
+} buddy;
 
 /*
   slab head struct, include cache(32B -> 4KB), freelist head, next slab pointer
@@ -76,21 +80,21 @@ static int size_to_order(size_t s) {
 
 //page alloc
 static void *pgalloc(int order) {
-  lock(&page_lock);
-  
+  lock(&buddy.page_lock);
+
   int cur = order;
 
   //find a order contain the order in need
-  while (cur <= MAX_ORDER && free_lists[cur] == NULL) {
+  while (cur <= MAX_ORDER && buddy.free_lists[cur] == NULL) {
       cur++;
   }
   if (cur > MAX_ORDER) {
     printf("heap out of memory\n");
-    unlock(&page_lock);
+    unlock(&buddy.page_lock);
     return NULL;
   }
-  block *b = free_lists[cur];
-  free_lists[cur] = b->next;
+  block *b = buddy.free_lists[cur];
+  buddy.free_lists[cur] = b->next;
   
   //the address return 
   uintptr_t addr = (uintptr_t)b;
@@ -99,29 +103,31 @@ static void *pgalloc(int order) {
     cur--;
     uintptr_t buddy_addr = addr + (1UL << cur);
 
-    block *buddy = (block *)buddy_addr;
-    buddy->next = free_lists[cur];
-    free_lists[cur] = buddy;
+    block *buddy_block = (block *)buddy_addr;
+    buddy_block->next = buddy.free_lists[cur];
+    buddy.free_lists[cur] = buddy_block;
 
     int buddy_idx = (buddy_addr - heap_base) >> PAGE_ORDER;
-    block_order[buddy_idx] = cur;
+    buddy.block_order[buddy_idx] = cur;
   }
   int idx = (addr - heap_base) >> PAGE_ORDER;
-  block_order[idx] = order;
+  buddy.block_order[idx] = order;
 
+#ifdef PMM_LOG
   printf("pgalloc address: %p, order: %d \n",(void*)b, (int)order);
+#endif
 
-  unlock(&page_lock);
+  unlock(&buddy.page_lock);
   return (void*)b;
 }
 
 //page free 
 static void pgfree(void *ptr) {
-  lock(&page_lock);
+  lock(&buddy.page_lock);
   
   uintptr_t addr = (uintptr_t)ptr;
   int idx = (addr - heap_base) >> PAGE_ORDER;
-  int order = block_order[idx];
+  int order = buddy.block_order[idx];
 
   while(order < MAX_ORDER) {
 
@@ -130,7 +136,7 @@ static void pgfree(void *ptr) {
     uintptr_t buddy_addr = ((uintptr_t)buddy_idx << PAGE_ORDER) + heap_base;
 
     block *prev = NULL;
-    block *cur = free_lists[order];
+    block *cur = buddy.free_lists[order];
 
     //find the buddy in the freelist to ensure buddy is exist
     while (cur) {
@@ -149,7 +155,7 @@ static void pgfree(void *ptr) {
     if (prev)
       prev->next = cur->next;
     else
-      free_lists[order] = cur->next;
+      buddy.free_lists[order] = cur->next;
 
     //ensure the addr is the left one
     if (buddy_addr < addr) {
@@ -160,13 +166,16 @@ static void pgfree(void *ptr) {
   }
 
   block *b = (block *)addr;
-  b->next = free_lists[order];
-  free_lists[order] = b;
+  b->next = buddy.free_lists[order];
+  buddy.free_lists[order] = b;
 
-  block_order[idx] = order;
+  buddy.block_order[idx] = order;
 
+#ifdef PMM_LOG
   printf("pgfree address: %p, order: %d\n", (void *)addr, order);
-  unlock(&page_lock);
+#endif
+
+  unlock(&buddy.page_lock);
 }
 
 
@@ -237,7 +246,9 @@ static void *slab_alloc(int order, int cpu_current) {
   slab_base->head.next = free_node->next; 
   slab_base->inuse += 1;
 
+#ifdef PMM_LOG
   printf("slab alloc address: %p, order: %d, slab in use: %d \n",(void*)free_node, (int)order, slab_base->inuse);
+#endif
 
   unlock(&cpu_cache[cpu_current].cache_lock);
   return (void*)free_node;
@@ -267,7 +278,9 @@ static int slab_free(void *ptr) {
 
   slab_base->inuse -= 1;
 
+#ifdef PMM_LOG
   printf("slab free address: %p, order: %d, slab in use: %d \n",(void*)node, (int)slab_base->slab_order, slab_base->inuse);
+#endif
 
   //slab is empty,try to free this page 
   if(slab_base->inuse == 0) {
@@ -301,17 +314,19 @@ static int slab_free(void *ptr) {
 */
 static void page_init() {
   for(int i = PAGE_ORDER;i <= MAX_ORDER; i++){
-    free_lists[i] = NULL;
+    buddy.free_lists[i] = NULL;
   }
-
+  
   block *base = (block *)heap_base;
   base->next = NULL;
-  free_lists[MAX_ORDER] = base;
+  buddy.free_lists[MAX_ORDER] = base;
 
+  buddy.page_lock = 0;
 }
 
 static void *kalloc(size_t size) {
   int order = size_to_order(size);
+
   if(order <= MAX_SLAB_ORDER) {
     return slab_alloc(order, cpu_current());
   }
@@ -335,17 +350,31 @@ static void kfree(void *ptr) {
   }
 }
 
-#endif
 
+//interrupt trap can use kalloc and free, to avoid deadlock, we need to disable the interrupt
+static void *kalloc_safe(size_t size) {
+  bool i = ienabled();
+  iset(false);
+  void *ret = kalloc(size);
+  if (i) iset(true);
+  return ret;
+}
+
+static void kfree_safe(void *ptr) {
+  int i = ienabled();
+  iset(false);
+  kfree(ptr);
+  if (i) iset(true);
+}
 
 
 static void pmm_init() {
   uintptr_t pmsize = ((uintptr_t)heap.end - (uintptr_t)heap.start);
   printf("Got %d MiB heap: [%p, %p)\n", pmsize >> 20, heap.start, heap.end);
 
-#ifdef BUDDY_AND_SLAB
-
+#ifdef PMM_LOG
   printf("page slab init\n");
+#endif 
 
   page_init();
 
@@ -363,14 +392,11 @@ static void pmm_init() {
       cpu_cache[i].slab_list_head[order] = create_slab(order, i);
     }
   }
-
-  printf("inital succeed\n\n"); 
-
-#endif
+  printf("pmm inital succeed\n\n"); 
 }
 
 MODULE_DEF(pmm) = {
   .init  = pmm_init,
-  .alloc = kalloc,
-  .free  = kfree,
+  .alloc = kalloc_safe,
+  .free  = kfree_safe,
 };
