@@ -1,11 +1,11 @@
-## nju oslab
+# NJU OSLab
 目前完成：
 amgame
 libco
 sperf
 pmm
 
-## modify_origin
+## Modify_origin
 ```
 1.AM Makefile:   
 	add: -Wno-error=array-bounds -g(line 88,89)  
@@ -22,6 +22,6 @@ pmm
 qemu-system-x86_64: QEMU emulator version 10.1.4 (qemu-10.1.4-1.fc43)
 ```
 
-## Problem need to be solves  
+## Problem need to be solved  
 1.pmm part: The heap memory size is defined directly.   
 
