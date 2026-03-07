@@ -21,3 +21,7 @@ pmm
 ```
 qemu-system-x86_64: QEMU emulator version 10.1.4 (qemu-10.1.4-1.fc43)
 ```
+
+## Problem need to be solves  
+1.pmm part: The heap memory size is defined directly.   
+
