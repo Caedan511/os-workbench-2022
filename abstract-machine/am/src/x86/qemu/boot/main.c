@@ -64,8 +64,8 @@ static void load_elf32(Elf32_Ehdr *elf) {
 }
 
 void load_kernel(void) {
-  Elf32_Ehdr *elf32 = (void *)0x8000;
-  Elf64_Ehdr *elf64 = (void *)0x8000;
+  volatile Elf32_Ehdr *elf32 = (void *)0x8000;
+  volatile Elf64_Ehdr *elf64 = (void *)0x8000;
   int is_ap = boot_record()->is_ap;
 
   if (!is_ap) {
