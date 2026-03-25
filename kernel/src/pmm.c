@@ -5,13 +5,6 @@
   slow path: buddy, alloc page
   fast path: slab, alloc small size memory
 */
-//spin lock
-static inline void lock(int *locked) { 
-  while (atomic_xchg(locked, 1)); 
-}
-static inline void unlock(int *locked) {
-  atomic_xchg(locked, 0); 
-}
 
 
 #define PAGE_ORDER 16    //page_size: 64kB
@@ -77,10 +70,20 @@ static int size_to_order(size_t s) {
   return order;
 }
 
+/*
+  The pmm init is earlier than kmt init, therefore we dont use pmm->spinlock to implement lock
+*/
+static inline void pmm_lock(int *locked) { 
+  while (atomic_xchg(locked, 1)); 
+}
+static inline void pmm_unlock(int *locked) {
+  atomic_xchg(locked, 0); 
+}
+
 
 //page alloc
 static void *pgalloc(int order) {
-  lock(&buddy.page_lock);
+  pmm_lock(&buddy.page_lock);
 
   int cur = order;
 
@@ -90,7 +93,7 @@ static void *pgalloc(int order) {
   }
   if (cur > MAX_ORDER) {
     printf("heap out of memory\n");
-    unlock(&buddy.page_lock);
+    pmm_unlock(&buddy.page_lock);
     return NULL;
   }
   block *b = buddy.free_lists[cur];
@@ -117,13 +120,13 @@ static void *pgalloc(int order) {
   printf("pgalloc address: %p, order: %d \n",(void*)b, (int)order);
 #endif
 
-  unlock(&buddy.page_lock);
+  pmm_unlock(&buddy.page_lock);
   return (void*)b;
 }
 
 //page free 
 static void pgfree(void *ptr) {
-  lock(&buddy.page_lock);
+  pmm_lock(&buddy.page_lock);
   
   uintptr_t addr = (uintptr_t)ptr;
   int idx = (addr - heap_base) >> PAGE_ORDER;
@@ -175,7 +178,7 @@ static void pgfree(void *ptr) {
   printf("pgfree address: %p, order: %d\n", (void *)addr, order);
 #endif
 
-  unlock(&buddy.page_lock);
+  pmm_unlock(&buddy.page_lock);
 }
 
 
@@ -212,7 +215,7 @@ static void *create_slab(short order, int owner_cpu) {
 }
 
 static void *slab_alloc(int order, int cpu_current) {
-  lock(&cpu_cache[cpu_current].cache_lock);
+  pmm_lock(&cpu_cache[cpu_current].cache_lock);
 
   slab *slab_base = cpu_cache[cpu_current].slab_list_head[order];
 
@@ -250,7 +253,7 @@ static void *slab_alloc(int order, int cpu_current) {
   printf("slab alloc address: %p, order: %d, slab in use: %d \n",(void*)free_node, (int)order, slab_base->inuse);
 #endif
 
-  unlock(&cpu_cache[cpu_current].cache_lock);
+  pmm_unlock(&cpu_cache[cpu_current].cache_lock);
   return (void*)free_node;
 }
 
@@ -265,11 +268,11 @@ static int slab_free(void *ptr) {
   //find which cpu cache this memory belong to
   short owner_cpu = slab_base->owner_cpu;
 
-  lock(&cpu_cache[owner_cpu].cache_lock);
+  pmm_lock(&cpu_cache[owner_cpu].cache_lock);
   
   //if the magic number is wrong, the ptr is point to a page, not slab, return -1 to free page 
   if(slab_base->magic_num != 0xdeadbeef) {
-    unlock(&cpu_cache[owner_cpu].cache_lock);
+    pmm_unlock(&cpu_cache[owner_cpu].cache_lock);
     return -1;
   }
 
@@ -303,7 +306,7 @@ static int slab_free(void *ptr) {
       pgfree(slab_base);
     }
   }
-  unlock(&cpu_cache[owner_cpu].cache_lock);
+  pmm_unlock(&cpu_cache[owner_cpu].cache_lock);
   return 0;
 }
 
@@ -392,7 +395,7 @@ static void pmm_init() {
       cpu_cache[i].slab_list_head[order] = create_slab(order, i);
     }
   }
-  printf("pmm inital succeed\n\n"); 
+  printf("\npmm inital succeed\n"); 
 }
 
 MODULE_DEF(pmm) = {

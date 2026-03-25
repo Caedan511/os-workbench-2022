@@ -11,3 +11,5 @@
 
 //test the alloc and free in os_run
 // #define PMM_TEST
+
+#define KMT_TEST

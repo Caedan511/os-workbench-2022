@@ -6,6 +6,11 @@ static task_t *cpu_idle[MAX_CPU];
 static cpu_t *cpus[MAX_CPU];
 static queue ready_queue;
 
+static task_t *to_be_awakened = NULL; //awaken list head
+static spinlock_t awakened_lock;
+
+static task_t *last_task[MAX_CPU];
+
 static void queue_init(queue* q, const char* name) {
   q->front = NULL;
   q->rear = NULL;
@@ -38,7 +43,33 @@ static void enqueue(queue *q, task_t* task) {
   }
 }
 
-static task_t* pick_next_task(task_t *pre) {
+static void handle_pre_task() {
+
+  task_t *prev = current[cpu_current()];
+  task_t *safe_to_enqueue = last_task[cpu_current()];
+
+  if(safe_to_enqueue) {
+    if (safe_to_enqueue->state == READY && safe_to_enqueue != cpu_idle[cpu_current()]) {
+      enqueue(&ready_queue, safe_to_enqueue);
+    }
+    else if (safe_to_enqueue->state == BLOCKING){
+      safe_to_enqueue->state = BLOCKED;
+    }
+    last_task[cpu_current()] = NULL;
+  }
+
+  if (prev->state == RUNNING) {
+      prev->state = READY;
+  }
+  else if(prev->state == BLOCKING) {
+    // assert(ev.event == EVENT_YIELD);
+  }
+  else {
+    panic("wrong entry");
+  }
+  last_task[cpu_current()] = prev;
+}
+static task_t* pick_next_task() {
   //pop a task from ready queue, 
   //if queue is empty, return NULL, next task will be idle task 
   task_t *next = dequeue(&ready_queue);
@@ -50,15 +81,6 @@ static task_t* pick_next_task(task_t *pre) {
   }
   else {
     assert(next->state == READY);
-  } 
-  //judge if we should push previous task to queue
-  //if previous state is RUNNING, not BLOCKED or others, set it state to READY
-  //while previous is not idle task, push it to ready queue
-  if(pre->state == RUNNING) {
-    pre->state = READY;
-    if(pre != cpu_idle[cpu_current()]) {
-      enqueue(&ready_queue, pre);
-    } 
   }
   //set next state
   next->state = RUNNING;
@@ -66,23 +88,57 @@ static task_t* pick_next_task(task_t *pre) {
   return next;
 }
 
+//awakened the task in to_be_awakened,make sure this task is BLOCKED
+static void awaken() {
+  //get the awakened_list
+  kmt->spin_lock(&awakened_lock);
+  task_t *t = to_be_awakened;
+  to_be_awakened = NULL; 
+
+  while(t) {
+    task_t *next = t->next;
+    if(t->state == BLOCKED) {
+      t->next = NULL;
+      t->state = READY;
+      enqueue(&ready_queue, t);
+
+    } else {
+      assert(t->state == BLOCKING);
+      t->next = to_be_awakened;
+      to_be_awakened = t;
+    }
+    t = next;
+  }
+  kmt->spin_unlock(&awakened_lock);
+}
+/*
+  three main work in scheduler: 
+  handle pre_task(the trap stack is in pre task, so it should be careful),
+  awaken, the sem_signal awaken some waiting task, it will be manager in there
+  pick next task, pick from the ready queue  
+*/
 static Context* kmt_schedule(Event ev, Context *context) {
   if(ev.event == EVENT_IRQ_TIMER || ev.event == EVENT_YIELD) {
-    // if(ev.event == EVENT_IRQ_TIMER)
+
+    //ready queue can only be modified in here and kmt_create
     kmt->spin_lock(&ready_queue.lock);
-    task_t *prev = current[cpu_current()];
-    
-    //if prev is to be blocked, it is from sem_wait yield()
-    if(prev->state == BLOCKING){
-      assert(ev.event == EVENT_YIELD);
-      prev->state = BLOCKED;
-      kmt->spin_unlock(&prev->lock);
-    }
 
-    task_t *next = pick_next_task(prev);
-
+    handle_pre_task();
+    awaken();
+ 
+    task_t *next = pick_next_task();
     current[cpu_current()] = next;
+
     kmt->spin_unlock(&ready_queue.lock);
+    //ATTENTION!!!
+    //Here could cause a huge bug
+    //the ready queue lock have been released,
+    //some other cpu can run the scheduler at the same time 
+    //if some cpu get pre task, and start run it 
+    //then, the two cpu run in same stack space
+    //the stack will crash
+
+    // for (int volatile i = 0; i < 100000; i++) ;
     return next->context;
   }
   else {
@@ -92,16 +148,37 @@ static Context* kmt_schedule(Event ev, Context *context) {
 static Context* kmt_context_save(Event ev, Context *context) {
 
   task_t *cur = current[cpu_current()];
-  assert(cur->state == RUNNING || cur->state == BLOCKING) ;
+  assert(cur->state == RUNNING || cur->state == BLOCKING);
   cur->context = context;
     
   return NULL;
 }
+task_t* mytask() {
+  return current[cpu_current()];
+}
+//error handler, detect stack overflow and error interrupt
+static Context* error_detect(Event ev, Context *context) {
 
+  if(mytask() != cpu_idle[cpu_current()])
+    //canaries to make sure there are no stack overflow
+    panic_on(*(uint32_t*)(mytask()->stack.start) != 0xdeadbeef, "kmt stack overflow");
+
+  if(ev.event == EVENT_ERROR||ev.event == EVENT_PAGEFAULT)
+    panic("fault");
+
+  return NULL;
+}
+/*
+  kernel multithread init, add the schedule, error handler etc. to interrupt function
+  the idle task struct don't have context after init, it will be filled when schedule first.
+
+*/
 static void kmt_init() {
   
-  os->on_irq(INT_MAX, EVENT_NULL, kmt_schedule);
-  os->on_irq(INT_MIN, EVENT_NULL, kmt_context_save);
+  os->on_irq(INT_MAX - 1, EVENT_NULL, kmt_schedule);
+  os->on_irq(INT_MIN + 1, EVENT_NULL, kmt_context_save);
+  os->on_irq(INT_MIN, EVENT_NULL, error_detect);
+  os->on_irq(INT_MAX, EVENT_NULL, error_detect);
 
   //initial the idle task and cpus 
   for(int i = 0;i < cpu_count();i++ ) {
@@ -121,15 +198,21 @@ static void kmt_init() {
   }
 
   queue_init(&ready_queue, "ready queue");
+  kmt->spin_init(&awakened_lock, "awakened list");
 
   printf("kmt init succeed\n");
 
 }
-
+/*
+  init the task struct, alloc the stack memory, you should allocate memory for task struct before calling the function.
+*/
 static int kmt_create(task_t *task, const char *name, void (*entry)(void *arg), void *arg) {
   task->name = name;
+
   task->stack.start = pmm->alloc(STACK_SIZE);
+  *(uint32_t*)(task->stack.start) = 0xdeadbeef;   //add magic number in the top of stack
   task->stack.end = (void*)(task->stack.start + STACK_SIZE);
+
   task->context = kcontext(task->stack, entry, arg);
   task->state = READY;
   task->next = NULL;
@@ -141,7 +224,6 @@ static int kmt_create(task_t *task, const char *name, void (*entry)(void *arg), 
   kmt->spin_unlock(&ready_queue.lock);
 
   printf("kmt create task:%s\n",name);
-  
   return true;
 }
 
@@ -157,6 +239,7 @@ static void kmt_teardown(task_t *task) {
 static void push_off() {
   int old = ienabled();  
   iset(false);            // disable interrupt
+  asm volatile("" ::: "memory");
   cpu_t *cpu = cpus[cpu_current()];
   
   assert(cpu == cpus[cpu_current()]);
@@ -202,7 +285,7 @@ static void spin_unlock(spinlock_t *lk) {
 static void sem_init(sem_t *sem, const char *name, int value) {
   sem->name = name;
   sem->count = value;
-  sem->wait_list = NULL;
+  queue_init(&sem->wait_list, name);
 
   kmt->spin_init(&sem->lock, name);
 }
@@ -214,15 +297,18 @@ static void sem_wait(sem_t *sem) {
     task_t *cur = current[cpu_current()];
     assert(cur->state == RUNNING);
 
-    kmt->spin_lock(&cur->lock);
+    //Use the BLOCKING state to ensure that the task does not prematurely enter the ready queue
+    //this task will really blocked in schedule
     cur->state = BLOCKING;
-    cur->next = sem->wait_list;
-    sem->wait_list = cur;
+
+    enqueue(&sem->wait_list, cur);
     
     kmt->spin_unlock(&sem->lock);
     //ATTENTION!!!
-    //there could cause a huge bug,
-    //if another cpu run sem_sugnal here, the blocked state will change to ready  
+    //There could cause a huge bug:
+    //if another cpu run sem_signal here, the blocked state will change to ready and enqueue to ready queue
+    //then, another cpu trap and get a ready task, this task can be assigned,
+    //and in the same time, this function haven't yield, there will have two cpu run one task, crash! 
     yield();
   }
   else {
@@ -236,20 +322,15 @@ static void sem_signal(sem_t *sem) {
 
   if (sem->count <= 0) {
     //chose one wait task
-    task_t *t = sem->wait_list;
+    task_t *t = dequeue(&sem->wait_list);
+    assert(t);
 
-    //remove from wait list
-    sem->wait_list = t->next;
-    
-    kmt->spin_lock(&t->lock);
-    kmt->spin_lock(&ready_queue.lock);
-    
-    assert(t->state == BLOCKED);
-    t->state = READY;
-    enqueue(&ready_queue, t);
+    //add this task to awakened list,this task will be awakened in schedule
+    kmt->spin_lock(&awakened_lock);
+    t->next = to_be_awakened;
+    to_be_awakened = t;
+    kmt->spin_unlock(&awakened_lock);
 
-    kmt->spin_unlock(&t->lock);
-    kmt->spin_unlock(&ready_queue.lock);
   }
   kmt->spin_unlock(&sem->lock);
 }
